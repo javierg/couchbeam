@@ -42,7 +42,6 @@ make_headers(Method, Url, Headers, Options) ->
         _ ->
             Headers
     end,
-   {Headers2, Options1} = maybe_oauth_header(Method, Url, Headers1, Options),
    maybe_proxyauth_header(Headers2, Options1).
 
 
