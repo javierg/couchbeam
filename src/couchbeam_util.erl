@@ -282,9 +282,9 @@ proxy_token(Secret,UserName) ->
 hmac(Alg, Key, Data) ->
     case {Alg, erlang:function_exported(crypto, hmac, 3)} of
         {_, true} ->
-            crypto:hmac(Alg, Key, Data);
+            crypto:mac(Alg, sha1, Key, Data);
         {sha, false} ->
-            crypto:sha_mac(Key, Data);
+            crypto:mac(sha, sha1, Key, Data);
         {Alg, false} ->
             throw({unsupported, Alg})
     end.
