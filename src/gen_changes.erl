@@ -128,7 +128,9 @@ handle_info({Ref, Msg},
             State#gen_changes_state{last_seq=LastSeq};
         {change, Change} ->
             Seq = couchbeam_doc:get_value(<<"seq">>, Change),
-            State#gen_changes_state{last_seq=Seq}
+            State#gen_changes_state{last_seq=Seq};
+        {error, Error} ->
+            State#gen_changes_state{modstate=Error}
     end,
 
     case catch Module:handle_change(Msg, ModState) of
