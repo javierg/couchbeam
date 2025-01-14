@@ -37,7 +37,7 @@ behaviour_info(callbacks) ->
      {handle_info, 2},
      {terminate, 2}];
 behaviour_info(_) ->
-    undefined.
+    [].
 
 call(Name, Request) ->
     gen_server:call(Name, Request).
