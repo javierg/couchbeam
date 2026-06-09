@@ -6,6 +6,10 @@
 -module(couchbeam_httpc).
 
 -export([request/5,
+         stream_request/5,
+         stream_body/1,
+         stream_body_all/1,
+         read_response/1,
          db_request/5, db_request/6,
          json_body/1,
          db_resp/2,
@@ -19,13 +23,14 @@
 -include("couchbeam.hrl").
 
 %% @doc Make an HTTP request via hackney.
-%% Returns vary based on options:
-%% - Normal request: {ok, Status, Headers, Pid}
+%% With hackney 4.x the response body is read eagerly. Returns vary based
+%% on options:
+%% - Normal request: {ok, Status, Headers, Body::binary()}
 %% - HEAD request: {ok, Status, Headers}
-%% - Streaming body (body=stream): {ok, Pid}
-%% - Async request: {ok, Pid}
+%% - Streaming body upload (body=stream): {ok, Pid}
+%% - Async request: {ok, Ref}
 -spec request(atom(), binary(), list(), term(), list()) ->
-    {ok, integer(), list(), pid()} |
+    {ok, integer(), list(), binary()} |
     {ok, integer(), list()} |
     {ok, pid()} |
     {error, term()}.
@@ -35,6 +40,91 @@ request(Method, Url, Headers, Body, Options) ->
 
     hackney:request(Method, Url , FinalHeaders, Body, FinalOpts).
 
+%% @doc Make a streaming GET/POST request and consume the initial status
+%% and headers, returning {ok, Status, Headers, Ref}. The caller can then
+%% pull the response body one chunk at a time with stream_body/1. This
+%% replaces the pull-based response streaming removed in hackney 4.x by
+%% driving hackney's async ({async, once}) flow-controlled mode.
+-spec stream_request(atom(), binary(), list(), term(), list()) ->
+    {ok, integer(), list(), pid()} | {error, term()}.
+stream_request(Method, Url, Headers, Body, Options) ->
+    {FinalHeaders, FinalOpts} = make_headers(Method, Url, Headers, Options),
+    Options1 = [{async, once} | FinalOpts],
+    case hackney:request(Method, Url, FinalHeaders, Body, Options1) of
+        {ok, Ref} ->
+            %% In {async, once} mode hackney delivers the status and headers
+            %% messages immediately, before waiting for stream_next/1.
+            receive
+                {hackney_response, Ref, {status, Status, _Reason}} ->
+                    receive
+                        {hackney_response, Ref, {headers, RespHeaders}} ->
+                            {ok, Status, RespHeaders, Ref};
+                        {hackney_response, Ref, {error, Reason}} ->
+                            {error, Reason}
+                    after ?DEFAULT_TIMEOUT ->
+                        {error, timeout}
+                    end;
+                {hackney_response, Ref, {error, Reason}} ->
+                    {error, Reason}
+            after ?DEFAULT_TIMEOUT ->
+                {error, timeout}
+            end;
+        Error ->
+            Error
+    end.
+
+%% @doc Pull the next response body chunk from a stream started with
+%% stream_request/5. Mirrors the old hackney:stream_body/1 contract:
+%% {ok, Data} | done | {error, term()}.
+-spec stream_body(pid()) -> {ok, binary()} | done | {error, term()}.
+stream_body(Ref) ->
+    hackney:stream_next(Ref),
+    receive
+        {hackney_response, Ref, done} ->
+            done;
+        {hackney_response, Ref, {error, Reason}} ->
+            {error, Reason};
+        {hackney_response, Ref, Data} when is_binary(Data) ->
+            {ok, Data};
+        %% tolerate late status/headers messages
+        {hackney_response, Ref, {status, _, _}} ->
+            stream_body(Ref);
+        {hackney_response, Ref, {headers, _}} ->
+            stream_body(Ref)
+    after ?DEFAULT_TIMEOUT ->
+        {error, timeout}
+    end.
+
+%% @doc Drain a stream started with stream_request/5 into a single binary.
+-spec stream_body_all(pid()) -> {ok, binary()} | {error, term()}.
+stream_body_all(Ref) ->
+    stream_body_all(Ref, []).
+
+stream_body_all(Ref, Acc) ->
+    case stream_body(Ref) of
+        {ok, Data} ->
+            stream_body_all(Ref, [Data | Acc]);
+        done ->
+            {ok, iolist_to_binary(lists:reverse(Acc))};
+        {error, _} = Error ->
+            Error
+    end.
+
+%% @doc Read the response after a streamed body upload (start_response/1)
+%% into the eager {ok, Status, Headers, Body} shape used by db_resp/2.
+-spec read_response(pid()) ->
+    {ok, integer(), list(), binary()} | {error, term()}.
+read_response(Ref) ->
+    case hackney:start_response(Ref) of
+        {ok, Status, Headers, ConnPid} ->
+            case hackney:body(ConnPid) of
+                {ok, Body} -> {ok, Status, Headers, Body};
+                {error, _} = Error -> Error
+            end;
+        Error ->
+            Error
+    end.
+
 db_request(Method, Url, Headers, Body, Options) ->
     db_request(Method, Url, Headers, Body, Options, []).
 
@@ -42,13 +132,10 @@ db_request(Method, Url, Headers, Body, Options, Expect) ->
     Resp = request(Method, Url, Headers, Body, Options),
     db_resp(Resp, Expect).
 
-json_body(Ref) ->
-    case hackney:body(Ref) of
-        {ok, Body} ->
-            couchbeam_ejson:decode(Body);
-        {error, _} = Error ->
-            Error
-    end.
+%% @doc Decode a JSON response body. With hackney 4.x request/5 reads the
+%% body eagerly into a binary, so this just decodes it.
+json_body(Body) when is_binary(Body) ->
+    couchbeam_ejson:decode(Body).
 
 make_headers(Method, Url, Headers, Options) ->
     Headers1 = case couchbeam_util:get_value(<<"Accept">>, Headers) of
@@ -78,7 +165,7 @@ maybe_proxyauth_header(Headers, Options) ->
       {lists:append([ProxyauthProps,Headers]), proplists:delete(proxyauth, Options)}
   end.
 
-db_resp({ok, Ref}=Resp, _Expect) when is_reference(Ref) ->
+db_resp({ok, Ref}=Resp, _Expect) when is_pid(Ref) orelse is_reference(Ref) ->
     Resp;
 db_resp({ok, 401, _}, _Expect) ->
     {error, unauthenticated};
@@ -98,39 +185,25 @@ db_resp({ok, Status, Headers}=Resp, Expect) ->
         false ->
             {error, {bad_response, {Status, Headers, <<>>}}}
     end;
-db_resp({ok, 401, _, Ref}, _Expect) ->
-    hackney:skip_body(Ref),
+db_resp({ok, 401, _, _}, _Expect) ->
     {error, unauthenticated};
-db_resp({ok, 403, _, Ref}, _Expect) ->
-    hackney:skip_body(Ref),
+db_resp({ok, 403, _, _}, _Expect) ->
     {error, forbidden};
-db_resp({ok, 404, _, Ref}, _Expect) ->
-    hackney:skip_body(Ref),
+db_resp({ok, 404, _, _}, _Expect) ->
     {error, not_found};
-db_resp({ok, 409, _, Ref}, _Expect) ->
-    hackney:skip_body(Ref),
+db_resp({ok, 409, _, _}, _Expect) ->
     {error, conflict};
-db_resp({ok, 412, _, Ref}, _Expect) ->
-    hackney:skip_body(Ref),
+db_resp({ok, 412, _, _}, _Expect) ->
     {error, precondition_failed};
 db_resp({ok, _, _, _}=Resp, []) ->
     Resp;
-db_resp({ok, Status, Headers, Ref}=Resp, Expect) ->
+db_resp({ok, Status, Headers, Body}=Resp, Expect) ->
     case lists:member(Status, Expect) of
         true -> Resp;
-        false -> {error, {bad_response, {Status, Headers, db_resp_body(Ref)}}}
+        false -> {error, {bad_response, {Status, Headers, Body}}}
     end;
 db_resp(Error, _Expect) ->
     Error.
-
-db_resp_body(Ref) ->
-    case hackney:body(Ref) of
-        {ok, Body} -> Body;
-        {error, _} ->
-            %% Try to close the connection to prevent leaks
-            catch hackney:close(Ref),
-            <<>>
-    end.
 
 -spec server_url(server()) -> binary().
 %% @doc Asemble the server URL for the given client
@@ -153,21 +226,18 @@ reply_att(ok) ->
     ok;
 reply_att(done) ->
     done;
-reply_att({ok, 404, _, Ref}) ->
-    hackney:skip_body(Ref),
+reply_att({ok, 404, _, _}) ->
     {error, not_found};
-reply_att({ok, 409, _, Ref}) ->
-    hackney:skip_body(Ref),
+reply_att({ok, 409, _, _}) ->
     {error, conflict};
-reply_att({ok, Status, _, Ref}) when Status =:= 200 orelse Status =:= 201 ->
-  case couchbeam_httpc:json_body(Ref) of
+reply_att({ok, Status, _, Body}) when Status =:= 200 orelse Status =:= 201 ->
+  case couchbeam_httpc:json_body(Body) of
       #{<<"ok">> := true} = Map ->
           {ok, maps:remove(<<"ok">>, Map)};
-      {error, _} = Error ->
-          Error
+      Other ->
+          {error, {bad_response, Other}}
   end;
-reply_att({ok, Status, Headers, Ref}) ->
-    {ok, Body} = hackney:body(Ref),
+reply_att({ok, Status, Headers, Body}) ->
     {error, {bad_response, {Status, Headers, Body}}};
 reply_att(Error) ->
     Error.
@@ -186,7 +256,7 @@ wait_mp_doc_loop(Ref, Parser, InputBuffer, DocBuffer) ->
             wait_mp_doc_body(Ref, BodyCont, DocBuffer);
         {more, NewParser} ->
             %% Need more data from the connection
-            case hackney:stream_body(Ref) of
+            case stream_body(Ref) of
                 {ok, Data} ->
                     wait_mp_doc_loop(Ref, NewParser, Data, DocBuffer);
                 done ->
@@ -227,7 +297,7 @@ wait_mp_doc_body(Ref, BodyCont, DocBuffer) ->
             end;
         {more, MoreBodyCont} ->
             %% Need more data
-            case hackney:stream_body(Ref) of
+            case stream_body(Ref) of
                 {ok, Data} ->
                     %% Feed the data and continue
                     wait_mp_doc_body_with_data(Ref, MoreBodyCont, DocBuffer, Data);
@@ -276,7 +346,7 @@ wait_mp_doc_next_part(Ref, NextPartCont) ->
         {headers, _Headers, BodyCont} ->
             wait_mp_doc_body(Ref, BodyCont, <<>>);
         {more, Parser} ->
-            case hackney:stream_body(Ref) of
+            case stream_body(Ref) of
                 {ok, Data} ->
                     wait_mp_doc_loop(Ref, Parser, Data, <<>>);
                 done ->
@@ -314,7 +384,7 @@ wait_mp_att_next_part(Ref, NextPartCont, {AttName, AttNames}) ->
                     {att, Name, NState}
             end;
         {more, Parser} ->
-            case hackney:stream_body(Ref) of
+            case stream_body(Ref) of
                 {ok, Data} ->
                     wait_mp_att_parse(Ref, Parser, Data, {AttName, AttNames});
                 done ->
@@ -350,7 +420,7 @@ wait_mp_att_parse(Ref, Parser, Data, {AttName, AttNames}) ->
                     {att, Name, NState}
             end;
         {more, NewParser} ->
-            case hackney:stream_body(Ref) of
+            case stream_body(Ref) of
                 {ok, NewData} ->
                     wait_mp_att_parse(Ref, NewParser, NewData, {AttName, AttNames});
                 done ->
@@ -374,7 +444,7 @@ wait_mp_att_body(Ref, BodyCont, {AttName, AttNames}) ->
             NState = {Ref, fun() -> wait_mp_att_next_part(Ref, NextPartCont, {nil, AttNames}) end},
             {att_eof, AttName, NState};
         {more, MoreBodyCont} ->
-            case hackney:stream_body(Ref) of
+            case stream_body(Ref) of
                 {ok, Data} ->
                     wait_mp_att_body_with_data(Ref, MoreBodyCont, Data, {AttName, AttNames});
                 done ->
@@ -529,10 +599,10 @@ send_mp_doc_atts([Att | Rest], Ref, Doc, Boundary) ->
 
 %% @hidden
 mp_doc_reply(Ref, Doc) ->
-    Resp = hackney:start_response(Ref),
+    Resp = read_response(Ref),
     case couchbeam_httpc:db_resp(Resp, [200, 201]) of
-        {ok, _, _, Ref} ->
-            JsonProp = couchbeam_httpc:json_body(Ref),
+        {ok, _, _, Body} ->
+            JsonProp = couchbeam_httpc:json_body(Body),
             NewRev = maps:get(<<"rev">>, JsonProp),
             NewDocId = maps:get(<<"id">>, JsonProp),
             %% set the new doc ID

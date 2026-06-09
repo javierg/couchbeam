@@ -663,20 +663,39 @@ view_stream_loop(#view_stream_state{owner = Owner, ref = Ref, mref = MRef,
     end.
 
 decode_view_data(Data, #view_stream_state{owner = Owner, ref = Ref,
-                                           client_ref = ClientRef,
                                            parser = Parser} = State) ->
     {Rows, Parser1} = json_stream_parse:feed(Data, Parser),
     %% Send each row to owner
     lists:foreach(fun(Row) -> Owner ! {Ref, {row, Row}} end, Rows),
-    case Parser1 of
-        #st{phase = done} ->
-            %% All rows parsed
-            catch hackney:stop_async(ClientRef),
-            catch hackney:skip_body(ClientRef),
+    Done = case Parser1 of #st{phase = done} -> true; _ -> false end,
+    continue_view(State#view_stream_state{parser = Parser1}, Done).
+
+%% In {async, once} mode, wait for the owner to request the next batch before
+%% pulling more from the connection or finishing. This keeps the stream
+%% process alive until the owner has consumed the first batch (and can call
+%% stream_next/1). After the first request we drain the rest without further
+%% gating, so the owner receives all remaining rows and the final done.
+continue_view(#view_stream_state{ref = Ref, mref = MRef, owner = Owner,
+                                 client_ref = ClientRef,
+                                 async = once} = State, Done) ->
+    receive
+        {'DOWN', MRef, _, _, _} ->
+            exit(normal);
+        {Ref, cancel} ->
+            try hackney:close(ClientRef) catch _:_ -> ok end,
+            Owner ! {Ref, ok};
+        {Ref, stream_next} when Done ->
+            try hackney:close(ClientRef) catch _:_ -> ok end,
             Owner ! {Ref, done};
-        _ ->
-            maybe_continue_view(State#view_stream_state{parser = Parser1})
-    end.
+        {Ref, stream_next} ->
+            view_stream_loop(State#view_stream_state{async = normal})
+    end;
+continue_view(#view_stream_state{owner = Owner, ref = Ref,
+                                 client_ref = ClientRef}, true) ->
+    try hackney:close(ClientRef) catch _:_ -> ok end,
+    Owner ! {Ref, done};
+continue_view(State, false) ->
+    maybe_continue_view(State).
 
 maybe_continue_view(#view_stream_state{ref = Ref, mref = MRef, owner = Owner,
                                         client_ref = ClientRef,
@@ -780,7 +799,6 @@ view_notfound_test() ->
 %% Helper to generate mock view responses based on URL
 view_mock_response(Url) ->
     UrlBin = iolist_to_binary(Url),
-    Ref = make_ref(),
     %% Check for limit=1 (used by first/3)
     HasLimit1 = case binary:match(UrlBin, <<"limit=1">>) of
         nomatch -> false;
@@ -849,7 +867,6 @@ view_mock_response(Url) ->
                   #{<<"id">> => <<"doc2">>, <<"key">> => <<"doc2">>, <<"value">> => #{}}
               ]}
     end,
-    couchbeam_mocks:set_body(Ref, Response),
-    {ok, 200, [], Ref}.
+    {ok, 200, [], couchbeam_mocks:body(Response)}.
 
 -endif.

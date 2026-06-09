@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.0] - 2026-06-09
+
+### Changed
+
+- Updated to hackney 4.2.2. Response bodies are now read eagerly: a normal
+  request returns `{ok, Status, Headers, Body}` with the body as a binary.
+- Reworked pull-based response streaming (multipart `open_doc`,
+  `fetch_attachment`/`stream_attachment` with `stream`, `stream_doc`) onto
+  hackney's async mode. The public streaming API is unchanged.
+- Replaced deprecated standalone `catch` expressions with `try ... catch`
+  for OTP 29.
+
+### Compatibility
+
+- Supports OTP 27, 28 and 29.
+- CI now also runs on OTP 29.
+
+### Dependencies
+
+- hackney: 4.2.2 (from 2.0.1)
+- meck (test): 1.2.0 (from 0.9.2)
+
+### Removed
+
+- `hackney:skip_body/1` usage (removed in hackney 4.x); bodies are read directly.
+
 ## [2.0.0] - 2026-01-21
 
 ### Breaking Changes

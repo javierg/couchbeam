@@ -339,9 +339,8 @@ decode_data(Data, #state{feed_type = longpoll, parser = Parser,
     State1 = lists:foldl(fun send_change/2, State, Changes),
     case Parser1 of
         #st{phase = done} ->
-            %% All results parsed
-            catch hackney:stop_async(ClientRef),
-            catch hackney:skip_body(ClientRef),
+            %% All results parsed - close this connection before reconnecting
+            try hackney:close(ClientRef) catch _:_ -> ok end,
             maybe_reconnect(State1#state{parser = Parser1});
         _ ->
             maybe_continue(State1#state{parser = Parser1})
@@ -356,14 +355,16 @@ parse_lines(Buffer, State) ->
     case binary:split(Buffer, <<"\n">>) of
         [Line, Rest] when byte_size(Line) > 0 ->
             %% Got a complete line - parse it
-            case catch couchbeam_ejson:decode(Line) of
-                {'EXIT', _} ->
-                    %% Invalid JSON, skip this line
-                    parse_lines(Rest, State);
+            try couchbeam_ejson:decode(Line) of
                 Change when is_map(Change) ->
                     State1 = send_change(Change, State),
                     parse_lines(Rest, State1);
                 _ ->
+                    %% Not a JSON object, skip this line
+                    parse_lines(Rest, State)
+            catch
+                _:_ ->
+                    %% Invalid JSON, skip this line
                     parse_lines(Rest, State)
             end;
         [<<>>, Rest] ->
@@ -569,19 +570,15 @@ follow_once_test() ->
                     nomatch ->
                         {error, not_found};
                     _ ->
-                        Ref = make_ref(),
-                        meck:expect(hackney, body, fun(_) ->
-                            Changes = [
-                                #{<<"seq">> => 1, <<"id">> => <<"doc1">>, <<"changes">> => [#{<<"rev">> => <<"1-abc">>}]},
-                                #{<<"seq">> => 2, <<"id">> => <<"doc2">>, <<"changes">> => [#{<<"rev">> => <<"1-def">>}]}
-                            ],
-                            Body = couchbeam_ejson:encode(#{
-                                <<"results">> => Changes,
-                                <<"last_seq">> => 2
-                            }),
-                            {ok, Body}
-                        end),
-                        {ok, 200, [], Ref}
+                        Changes = [
+                            #{<<"seq">> => 1, <<"id">> => <<"doc1">>, <<"changes">> => [#{<<"rev">> => <<"1-abc">>}]},
+                            #{<<"seq">> => 2, <<"id">> => <<"doc2">>, <<"changes">> => [#{<<"rev">> => <<"1-def">>}]}
+                        ],
+                        Body = couchbeam_ejson:encode(#{
+                            <<"results">> => Changes,
+                            <<"last_seq">> => 2
+                        }),
+                        {ok, 200, [], Body}
                 end
             end),
 

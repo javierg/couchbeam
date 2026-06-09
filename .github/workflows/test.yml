@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        otp: ['27.3', '28.0']
+        otp: ['27.3', '28.0', '29.0']
         rebar3: ['3.25.0']
 
     steps:
@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        otp: ['27.3', '28.0']
+        otp: ['27.3', '28.0', '29.0']
         rebar3: ['3.25.0']
 
     steps:
@@ -102,6 +102,12 @@ jobs:
         release: "14.2"
         usesh: true
         prepare: |
+          # The pkg repo is built for a newer FreeBSD minor than the VM image,
+          # so allow the OS-version mismatch and upgrade installed packages
+          # first to keep ABIs (e.g. git/pcre2) consistent.
+          export IGNORE_OSVERSION=yes
+          pkg update -f
+          pkg upgrade -y
           pkg install -y erlang-runtime28 rebar3 cmake git gmake go llvm18
         run: |
           # Ensure Erlang 28 is in PATH
