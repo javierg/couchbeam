@@ -102,7 +102,10 @@ jobs:
         release: "14.2"
         usesh: true
         prepare: |
-          # Upgrade base packages first so git matches the current pcre2 ABI
+          # The pkg repo is built for a newer FreeBSD minor than the VM image,
+          # so allow the OS-version mismatch and upgrade installed packages
+          # first to keep ABIs (e.g. git/pcre2) consistent.
+          export IGNORE_OSVERSION=yes
           pkg update -f
           pkg upgrade -y
           pkg install -y erlang-runtime28 rebar3 cmake git gmake go llvm18
