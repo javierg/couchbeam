@@ -233,8 +233,8 @@ shutdown_sync(Pid) when not is_pid(Pid)->
 shutdown_sync(Pid) ->
     MRef = erlang:monitor(process, Pid),
     try
-        catch unlink(Pid),
-        catch exit(Pid, shutdown),
+        try unlink(Pid) catch _:_ -> ok end,
+        try exit(Pid, shutdown) catch _:_ -> ok end,
         receive
         {'DOWN', MRef, _, _, _} ->
             ok

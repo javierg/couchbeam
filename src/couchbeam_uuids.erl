@@ -121,15 +121,13 @@ get_new_uuids(#server{url=ServerUrl, options=Opts}=Server, Backoff, Acc) ->
     Count = list_to_binary(integer_to_list(1000 - length(Acc))),
     Url = hackney_url:make_url(ServerUrl, <<"/_uuids">>, [{<<"count">>, Count}]),
     case couchbeam_httpc:request(get, Url, [], <<>>, Opts) of
-        {ok, 200, _, Ref} ->
-            {ok, Body} = hackney:body(Ref),
+        {ok, 200, _, Body} ->
             #{<<"uuids">> := Uuids} = couchbeam_ejson:decode(Body),
             ServerUuids = #server_uuids{server_url=ServerUrl,
                                         uuids=(Acc ++ Uuids)},
             ets:insert(couchbeam_uuids, ServerUuids),
             {ok, ServerUuids};
-        {ok, Status, Headers, Ref} ->
-            {ok, Body} = hackney:body(Ref),
+        {ok, Status, Headers, Body} ->
             {error, {bad_response, {Status, Headers, Body}}};
         {error, closed} ->
             wait_for_retry(Server, Backoff, Acc);

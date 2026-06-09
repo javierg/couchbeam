@@ -670,9 +670,8 @@ decode_view_data(Data, #view_stream_state{owner = Owner, ref = Ref,
     lists:foreach(fun(Row) -> Owner ! {Ref, {row, Row}} end, Rows),
     case Parser1 of
         #st{phase = done} ->
-            %% All rows parsed
-            catch hackney:stop_async(ClientRef),
-            catch hackney:skip_body(ClientRef),
+            %% All rows parsed - close the connection
+            try hackney:close(ClientRef) catch _:_ -> ok end,
             Owner ! {Ref, done};
         _ ->
             maybe_continue_view(State#view_stream_state{parser = Parser1})
@@ -780,7 +779,6 @@ view_notfound_test() ->
 %% Helper to generate mock view responses based on URL
 view_mock_response(Url) ->
     UrlBin = iolist_to_binary(Url),
-    Ref = make_ref(),
     %% Check for limit=1 (used by first/3)
     HasLimit1 = case binary:match(UrlBin, <<"limit=1">>) of
         nomatch -> false;
@@ -849,7 +847,6 @@ view_mock_response(Url) ->
                   #{<<"id">> => <<"doc2">>, <<"key">> => <<"doc2">>, <<"value">> => #{}}
               ]}
     end,
-    couchbeam_mocks:set_body(Ref, Response),
-    {ok, 200, [], Ref}.
+    {ok, 200, [], couchbeam_mocks:body(Response)}.
 
 -endif.

@@ -154,11 +154,9 @@ server_connection(Host, Port, Prefix, Options) ->
 -spec server_info(server()) -> {ok, map()} | {error, term()}.
 server_info(#server{url=Url, options=Opts}) ->
     case hackney:get(Url, [], <<>>, Opts) of
-        {ok, 200, _, Ref} ->
-            Version = couchbeam_httpc:json_body(Ref),
-            {ok, Version};
-        {ok, Status, Headers, Ref} ->
-            {ok, Body} = hackney:body(Ref),
+        {ok, 200, _, Body} ->
+            {ok, couchbeam_httpc:json_body(Body)};
+        {ok, Status, Headers, Body} ->
             {error, {bad_response, {Status, Headers, Body}}};
 
         Error ->
@@ -272,8 +270,7 @@ view_cleanup(#db{server=Server, name=DbName, options=Opts}) ->
     Headers = [{<<"Content-Type">>, <<"application/json">>}],
     Resp = couchbeam_httpc:db_request(post, Url, Headers, <<>>, Opts, [200, 202]),
     case Resp of
-        {ok, _, _, Ref} ->
-            catch hackney:skip_body(Ref),
+        {ok, _, _, _} ->
             ok;
         Error ->
             Error
@@ -318,8 +315,7 @@ create_db(#server{url=ServerUrl, options=Opts}=Server, DbName0, Options,
     Url = hackney_url:make_url(ServerUrl, DbName, Params),
     Resp = couchbeam_httpc:db_request(put, Url, [], <<>>, Options1, [201]),
     case Resp of
-        {ok, _Status, _Headers, Ref} ->
-            hackney:skip_body(Ref),
+        {ok, _Status, _Headers, _} ->
             {ok, #db{server=Server, name=DbName, options=Options1}};
         {error, precondition_failed} ->
             {error, db_exists};
@@ -362,8 +358,7 @@ open_or_create_db(#server{url=ServerUrl, options=Opts}=Server, DbName0,
     Opts1 = couchbeam_util:propmerge1(Options, Opts),
     Resp = couchbeam_httpc:request(get, Url, [], <<>>, Opts1),
     case couchbeam_httpc:db_resp(Resp, [200]) of
-        {ok, _Status, _Headers, Ref} ->
-            hackney:skip_body(Ref),
+        {ok, _Status, _Headers, _} ->
             open_db(Server, DbName, Options);
         {error, not_found} ->
             create_db(Server, DbName, Options, Params);
@@ -429,39 +424,72 @@ open_doc(#db{server=Server, options=Opts}=Db, DocId, Params) ->
                             A -> {A, proplists:delete(accept, Params)}
                         end,
     %% set the headers with the accepted content-type if needed
-    Headers = case {Accept, proplists:get_value("attachments", Params)} of
-                  {any, true} ->
-                      %% only use the more efficient method when we get the
-                      %% attachments so we don't use much bandwidth.
-                      [{<<"Accept">>, <<"multipart/related">>}];
-                  {Accept, _} when is_binary(Accept) ->
-                      %% accepted content-type has been forced
-                      [{<<"Accept">>, Accept}];
-                  _ ->
-                      []
-              end,
+    {Headers, Multipart} =
+        case {Accept, proplists:get_value("attachments", Params)} of
+            {any, true} ->
+                %% only use the more efficient method when we get the
+                %% attachments so we don't use much bandwidth.
+                {[{<<"Accept">>, <<"multipart/related">>}], true};
+            {Accept, _} when is_binary(Accept) ->
+                %% accepted content-type has been forced
+                {[{<<"Accept">>, Accept}], is_multipart_accept(Accept)};
+            _ ->
+                {[], false}
+        end,
     Url = hackney_url:make_url(couchbeam_httpc:server_url(Server), couchbeam_httpc:doc_url(Db, DocId1),
                                Params1),
-    case couchbeam_httpc:db_request(get, Url, Headers, <<>>, Opts,
-                                    [200, 201]) of
-        {ok, _, RespHeaders, Ref} ->
+    case Multipart of
+        true ->
+            %% a multipart response is possible: stream it so attachments can
+            %% be read incrementally.
+            open_doc_multipart(Url, Headers, Opts);
+        false ->
+            case couchbeam_httpc:db_request(get, Url, Headers, <<>>, Opts,
+                                            [200, 201]) of
+                {ok, _, _, Body} ->
+                    {ok, couchbeam_httpc:json_body(Body)};
+                Error ->
+                    Error
+            end
+    end.
+
+is_multipart_accept(Accept) ->
+    binary:match(Accept, <<"multipart">>) =/= nomatch.
+
+open_doc_multipart(Url, Headers, Opts) ->
+    case couchbeam_httpc:stream_request(get, Url, Headers, <<>>, Opts) of
+        {ok, Status, RespHeaders, Ref} when Status =:= 200 orelse Status =:= 201 ->
             ParsedHeaders = hackney_headers:from_list(RespHeaders),
             case hackney_headers:get_value(<<"content-type">>, ParsedHeaders) of
                 undefined ->
-                    {ok, couchbeam_httpc:json_body(Ref)};
+                    decode_stream_doc(Ref);
                 ContentType ->
                     case hackney_headers:parse_content_type(ContentType) of
-                        {<<"multipart">>, _, Params} ->
-                            %% we get a multipart request, start to parse it.
-                            {_, Boundary} = lists:keyfind(<<"boundary">>, 1, Params),
-                            InitialState =  {Ref, fun() ->
-                                                          couchbeam_httpc:wait_mp_doc(Ref, Boundary, <<>>)
-                                                  end},
+                        {<<"multipart">>, _, CTParams} ->
+                            %% we get a multipart response, start to parse it.
+                            {_, Boundary} = lists:keyfind(<<"boundary">>, 1, CTParams),
+                            InitialState = {Ref, fun() ->
+                                                         couchbeam_httpc:wait_mp_doc(Ref, Boundary, <<>>)
+                                                 end},
                             {ok, {multipart, InitialState}};
                         _ ->
-                            {ok, couchbeam_httpc:json_body(Ref)}
+                            decode_stream_doc(Ref)
                     end
             end;
+        {ok, 404, _, Ref} ->
+            _ = couchbeam_httpc:stream_body_all(Ref),
+            {error, not_found};
+        {ok, Status, RespHeaders, Ref} ->
+            {ok, Body} = couchbeam_httpc:stream_body_all(Ref),
+            {error, {bad_response, {Status, RespHeaders, Body}}};
+        Error ->
+            Error
+    end.
+
+decode_stream_doc(Ref) ->
+    case couchbeam_httpc:stream_body_all(Ref) of
+        {ok, Body} ->
+            {ok, couchbeam_httpc:json_body(Body)};
         Error ->
             Error
     end.
@@ -786,20 +814,33 @@ fetch_attachment(#db{server=Server, options=Opts}=Db, DocId, Name, Options0) ->
                                [couchbeam_httpc:db_url(Db), DocId1,
                                 Name],
                                Options2),
-    case hackney:get(Url, Headers, <<>>, Opts) of
-        {ok, 200, _, Ref} when Stream /= true ->
-            hackney:body(Ref);
-        {ok, 200, _, Ref} ->
-            {ok, Ref};
-        {ok, 404, _, Ref} ->
-            hackney:skip_body(Ref),
-            {error, not_found};
-        {ok, Status, Headers, Ref} ->
-            {ok, Body} = hackney:body(Ref),
-            {error, {bad_response, {Status, Headers, Body}}};
-
-        Error ->
-            Error
+    case Stream of
+        true ->
+            %% stream the attachment: drive hackney's async mode and let the
+            %% caller pull chunks with stream_attachment/1.
+            case couchbeam_httpc:stream_request(get, Url, Headers, <<>>, Opts) of
+                {ok, 200, _, Ref} ->
+                    {ok, Ref};
+                {ok, 404, _, Ref} ->
+                    _ = couchbeam_httpc:stream_body_all(Ref),
+                    {error, not_found};
+                {ok, Status, RespHeaders, Ref} ->
+                    {ok, Body} = couchbeam_httpc:stream_body_all(Ref),
+                    {error, {bad_response, {Status, RespHeaders, Body}}};
+                Error ->
+                    Error
+            end;
+        false ->
+            case hackney:get(Url, Headers, <<>>, Opts) of
+                {ok, 200, _, Body} ->
+                    {ok, Body};
+                {ok, 404, _, _} ->
+                    {error, not_found};
+                {ok, Status, RespHeaders, Body} ->
+                    {error, {bad_response, {Status, RespHeaders, Body}}};
+                Error ->
+                    Error
+            end
     end.
 
 %% @doc fetch an attachment chunk.
@@ -820,7 +861,7 @@ fetch_attachment(#db{server=Server, options=Opts}=Db, DocId, Name, Options0) ->
               | done
               | {error, term()}.
 stream_attachment(Ref) ->
-    hackney:stream_body(Ref).
+    couchbeam_httpc:stream_body(Ref).
 
 %% @doc Start streaming an attachment. Returns a reference that can be
 %% passed to stream_attachment/1 to receive chunks.
@@ -883,8 +924,7 @@ put_attachment(#db{server=Server, options=Opts}=Db, DocId, Name, Body,
 send_attachment(Ref, eof) ->
     case hackney:finish_send_body(Ref) of
         ok ->
-            Resp =  hackney:start_response(Ref),
-            couchbeam_httpc:reply_att(Resp);
+            couchbeam_httpc:reply_att(couchbeam_httpc:read_response(Ref));
         Error ->
             Error
     end;
@@ -971,8 +1011,7 @@ compact(#db{server=Server, options=Opts}=Db) ->
                                []),
     Headers = [{<<"Content-Type">>, <<"application/json">>}],
     case couchbeam_httpc:db_request(post, Url, Headers, <<>>, Opts, [202]) of
-        {ok, _, _, Ref} ->
-            hackney:skip_body(Ref),
+        {ok, _, _, _} ->
             ok;
         Error ->
             Error
@@ -987,8 +1026,7 @@ compact(#db{server=Server, options=Opts}=Db, DesignName) ->
                                                                     DesignName], []),
     Headers = [{<<"Content-Type">>, <<"application/json">>}],
     case couchbeam_httpc:db_request(post, Url, Headers, <<>>, Opts, [202]) of
-        {ok, _, _, Ref} ->
-            hackney:skip_body(Ref),
+        {ok, _, _, _} ->
             ok;
         Error ->
             Error
@@ -1087,10 +1125,8 @@ basic_test() ->
         ServerInfoResponse = #{<<"couchdb">> => <<"Welcome">>,
                                <<"version">> => <<"3.3.0">>,
                                <<"uuid">> => <<"test-uuid">>},
-        Ref = make_ref(),
         meck:expect(hackney, get, fun(_Url, _Headers, _Body, _Opts) ->
-            couchbeam_mocks:set_body(Ref, ServerInfoResponse),
-            {ok, 200, [], Ref}
+            {ok, 200, [], couchbeam_mocks:body(ServerInfoResponse)}
         end),
 
         Server = couchbeam:server_connection(),
@@ -1123,9 +1159,7 @@ db_test() ->
                 case lists:member(DbName, Dbs) of
                     true ->
                         put(mock_dbs, lists:delete(DbName, Dbs)),
-                        Ref = make_ref(),
-                        couchbeam_mocks:set_body(Ref, #{<<"ok">> => true}),
-                        {ok, 200, [], Ref};
+                        {ok, 200, [], couchbeam_mocks:body(#{<<"ok">> => true})};
                     false ->
                         {ok, 404, [], make_ref()}
                 end;
@@ -1135,9 +1169,7 @@ db_test() ->
                 Dbs = get(mock_dbs),
                 case lists:member(DbName, Dbs) of
                     true ->
-                        Ref = make_ref(),
-                        couchbeam_mocks:set_body(Ref, #{<<"db_name">> => DbName}),
-                        {ok, 200, [], Ref};
+                        {ok, 200, [], couchbeam_mocks:body(#{<<"db_name">> => DbName})};
                     false ->
                         {ok, 404, [], make_ref()}
                 end;
@@ -1203,15 +1235,11 @@ db_mock_handle_request(get, Url) ->
     case binary:match(Url, <<"_all_dbs">>) of
         nomatch ->
             %% db_info request
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, #{<<"db_name">> => <<"testdb">>}),
-            {ok, 200, [], Ref};
+            {ok, 200, [], couchbeam_mocks:body(#{<<"db_name">> => <<"testdb">>})};
         _ ->
             %% all_dbs request
             Dbs = get(mock_dbs),
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, Dbs),
-            {ok, 200, [], Ref}
+            {ok, 200, [], couchbeam_mocks:body(Dbs)}
     end;
 db_mock_handle_request(_Method, _Url) ->
     {ok, 200, [], make_ref()}.
@@ -1314,7 +1342,7 @@ basic_doc_test() ->
     after
         erase(mock_docs),
         erase(mock_uuid_counter),
-        catch meck:unload(couchbeam_uuids),
+        try meck:unload(couchbeam_uuids) catch _:_ -> ok end,
         couchbeam_mocks:teardown()
     end.
 
@@ -1351,9 +1379,7 @@ doc_mock_handle_request(put, Url, _Headers, Body) ->
                     UpdatedDoc = maps:merge(maps:remove(<<"_rev">>, maps:remove(<<"_id">>, DocProps)),
                                             #{<<"_id">> => DocId, <<"_rev">> => NewRev}),
                     put(mock_docs, maps:put(DocId, {UpdatedDoc, NewRev}, Docs)),
-                    Ref = make_ref(),
-                    couchbeam_mocks:set_body(Ref, #{<<"ok">> => true, <<"id">> => DocId, <<"rev">> => NewRev}),
-                    {ok, 201, [], Ref}
+                    {ok, 201, [], couchbeam_mocks:body(#{<<"ok">> => true, <<"id">> => DocId, <<"rev">> => NewRev})}
             end;
         false ->
             %% New document
@@ -1361,9 +1387,7 @@ doc_mock_handle_request(put, Url, _Headers, Body) ->
             NewDoc = maps:merge(maps:remove(<<"_rev">>, maps:remove(<<"_id">>, DocProps)),
                                 #{<<"_id">> => DocId, <<"_rev">> => NewRev}),
             put(mock_docs, maps:put(DocId, {NewDoc, NewRev}, Docs)),
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, #{<<"ok">> => true, <<"id">> => DocId, <<"rev">> => NewRev}),
-            {ok, 201, [], Ref}
+            {ok, 201, [], couchbeam_mocks:body(#{<<"ok">> => true, <<"id">> => DocId, <<"rev">> => NewRev})}
     end;
 doc_mock_handle_request(get, Url, _Headers, _Body) ->
     %% open_doc - GET /db/docid
@@ -1373,9 +1397,7 @@ doc_mock_handle_request(get, Url, _Headers, _Body) ->
         undefined ->
             {error, not_found};
         {Doc, _Rev} ->
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, Doc),
-            {ok, 200, [], Ref}
+            {ok, 200, [], couchbeam_mocks:body(Doc)}
     end;
 doc_mock_handle_request(head, Url, _Headers, _Body) ->
     %% lookup_doc_rev or doc_exists - HEAD /db/docid
@@ -1411,9 +1433,7 @@ doc_mock_handle_request(post, Url, _Headers, Body) ->
                         #{<<"ok">> => true, <<"id">> => DocId, <<"rev">> => NewRev}
                 end
             end, InputDocs),
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, Results),
-            {ok, 201, [], Ref}
+            {ok, 201, [], couchbeam_mocks:body(Results)}
     end;
 doc_mock_handle_request(copy, Url, Headers, _Body) ->
     %% copy_doc - COPY /db/docid with Destination header
@@ -1438,9 +1458,7 @@ doc_mock_handle_request(copy, Url, Headers, _Body) ->
             NewDoc = maps:merge(maps:without([<<"_rev">>, <<"_id">>], SourceDoc),
                                 #{<<"_id">> => DestId, <<"_rev">> => NewRev}),
             put(mock_docs, maps:put(DestId, {NewDoc, NewRev}, get(mock_docs))),
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, #{<<"ok">> => true, <<"id">> => DestId, <<"rev">> => NewRev}),
-            {ok, 201, [], Ref}
+            {ok, 201, [], couchbeam_mocks:body(#{<<"ok">> => true, <<"id">> => DestId, <<"rev">> => NewRev})}
     end;
 doc_mock_handle_request(_Method, _Url, _Headers, _Body) ->
     {ok, 200, [], make_ref()}.
@@ -1549,7 +1567,7 @@ copy_doc_test() ->
     after
         erase(mock_docs),
         erase(mock_uuid_counter),
-        catch meck:unload(couchbeam_uuids),
+        try meck:unload(couchbeam_uuids) catch _:_ -> ok end,
         couchbeam_mocks:teardown()
     end.
 
@@ -1577,9 +1595,7 @@ attachments_test() ->
                         undefined ->
                             {ok, 404, [], make_ref()};
                         AttBody ->
-                            Ref = make_ref(),
-                            couchbeam_mocks:set_body(Ref, AttBody),
-                            {ok, 200, [], Ref}
+                            {ok, 200, [], couchbeam_mocks:body(AttBody)}
                     end;
                 _ ->
                     {ok, 404, [], make_ref()}
@@ -1633,9 +1649,7 @@ att_mock_handle_request(put, Url, _Headers, Body) ->
             BodyBin = if is_binary(Body) -> Body; true -> iolist_to_binary(Body) end,
             put(mock_attachments, maps:put({DocId, AttName}, BodyBin, Atts)),
             NewRev = generate_mock_rev(),
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, #{<<"ok">> => true, <<"id">> => DocId, <<"rev">> => NewRev}),
-            {ok, 201, [], Ref};
+            {ok, 201, [], couchbeam_mocks:body(#{<<"ok">> => true, <<"id">> => DocId, <<"rev">> => NewRev})};
         false ->
             %% Regular doc PUT
             doc_mock_handle_request(put, Url, [], Body)
@@ -1646,9 +1660,7 @@ att_mock_handle_request(delete, Url, _Headers, _Body) ->
             Atts = get(mock_attachments),
             put(mock_attachments, maps:remove({DocId, AttName}, Atts)),
             NewRev = generate_mock_rev(),
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, #{<<"ok">> => true, <<"rev">> => NewRev}),
-            {ok, 200, [], Ref};
+            {ok, 200, [], couchbeam_mocks:body(#{<<"ok">> => true, <<"rev">> => NewRev})};
         false ->
             doc_mock_handle_request(delete, Url, [], <<>>)
     end;
@@ -1722,7 +1734,7 @@ replicate_test() ->
     after
         erase(mock_docs),
         erase(mock_uuid_counter),
-        catch meck:unload(couchbeam_uuids),
+        try meck:unload(couchbeam_uuids) catch _:_ -> ok end,
         couchbeam_mocks:teardown()
     end.
 
@@ -1736,9 +1748,7 @@ replicate_mock_handle(put, Url, Body) ->
             %% Save replication doc to _replicator
             DocId = generate_mock_uuid(),
             NewRev = generate_mock_rev(),
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, #{<<"ok">> => true, <<"id">> => DocId, <<"rev">> => NewRev}),
-            {ok, 201, [], Ref}
+            {ok, 201, [], couchbeam_mocks:body(#{<<"ok">> => true, <<"id">> => DocId, <<"rev">> => NewRev})}
     end;
 replicate_mock_handle(post, Url, Body) ->
     UrlBin = iolist_to_binary(Url),
@@ -1749,9 +1759,7 @@ replicate_mock_handle(post, Url, Body) ->
                     {ok, 200, [], make_ref()};
                 _ ->
                     %% ensure_full_commit
-                    Ref = make_ref(),
-                    couchbeam_mocks:set_body(Ref, #{<<"ok">> => true, <<"instance_start_time">> => <<"0">>}),
-                    {ok, 201, [], Ref}
+                    {ok, 201, [], couchbeam_mocks:body(#{<<"ok">> => true, <<"instance_start_time">> => <<"0">>})}
             end;
         _ ->
             %% _revs_diff - return all revisions as missing
@@ -1759,9 +1767,7 @@ replicate_mock_handle(post, Url, Body) ->
             Result = maps:fold(fun(DocId, Revs, Acc) ->
                 maps:put(DocId, #{<<"missing">> => Revs}, Acc)
             end, #{}, IdRevs),
-            Ref = make_ref(),
-            couchbeam_mocks:set_body(Ref, Result),
-            {ok, 200, [], Ref}
+            {ok, 200, [], couchbeam_mocks:body(Result)}
     end;
 replicate_mock_handle(Method, Url, Body) ->
     doc_mock_handle_request(Method, Url, [], Body).
