@@ -1962,8 +1962,7 @@ create_mango_index(#db{server=Server, options=Opts}=Db, Fields) ->
                {<<"accept">>, <<"application/json">>}],
     Body = couchbeam_ejson:encode(IndexSpec),
     case couchbeam_httpc:db_request(post, Url, Headers, Body, Opts, [200, 201]) of
-        {ok, _, _, Ref} ->
-            hackney:skip_body(Ref),
+        {ok, _, _, _} ->
             ct:pal("Created Mango index on fields: ~p", [Fields]),
             ok;
         {error, Reason} ->

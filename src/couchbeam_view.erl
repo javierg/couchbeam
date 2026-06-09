@@ -663,19 +663,39 @@ view_stream_loop(#view_stream_state{owner = Owner, ref = Ref, mref = MRef,
     end.
 
 decode_view_data(Data, #view_stream_state{owner = Owner, ref = Ref,
-                                           client_ref = ClientRef,
                                            parser = Parser} = State) ->
     {Rows, Parser1} = json_stream_parse:feed(Data, Parser),
     %% Send each row to owner
     lists:foreach(fun(Row) -> Owner ! {Ref, {row, Row}} end, Rows),
-    case Parser1 of
-        #st{phase = done} ->
-            %% All rows parsed - close the connection
+    Done = case Parser1 of #st{phase = done} -> true; _ -> false end,
+    continue_view(State#view_stream_state{parser = Parser1}, Done).
+
+%% In {async, once} mode, wait for the owner to request the next batch before
+%% pulling more from the connection or finishing. This keeps the stream
+%% process alive until the owner has consumed the first batch (and can call
+%% stream_next/1). After the first request we drain the rest without further
+%% gating, so the owner receives all remaining rows and the final done.
+continue_view(#view_stream_state{ref = Ref, mref = MRef, owner = Owner,
+                                 client_ref = ClientRef,
+                                 async = once} = State, Done) ->
+    receive
+        {'DOWN', MRef, _, _, _} ->
+            exit(normal);
+        {Ref, cancel} ->
+            try hackney:close(ClientRef) catch _:_ -> ok end,
+            Owner ! {Ref, ok};
+        {Ref, stream_next} when Done ->
             try hackney:close(ClientRef) catch _:_ -> ok end,
             Owner ! {Ref, done};
-        _ ->
-            maybe_continue_view(State#view_stream_state{parser = Parser1})
-    end.
+        {Ref, stream_next} ->
+            view_stream_loop(State#view_stream_state{async = normal})
+    end;
+continue_view(#view_stream_state{owner = Owner, ref = Ref,
+                                 client_ref = ClientRef}, true) ->
+    try hackney:close(ClientRef) catch _:_ -> ok end,
+    Owner ! {Ref, done};
+continue_view(State, false) ->
+    maybe_continue_view(State).
 
 maybe_continue_view(#view_stream_state{ref = Ref, mref = MRef, owner = Owner,
                                         client_ref = ClientRef,
