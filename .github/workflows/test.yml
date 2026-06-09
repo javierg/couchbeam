@@ -181,12 +181,4 @@ jobs:
         COUCHDB_URL: http://localhost:5984
         COUCHDB_USER: admin
         COUCHDB_PASS: admin
-      run: |
-        # Run each test group individually for better isolation
-        for group in server_ops database_ops document_ops bulk_ops attachment_ops \
-                     view_streaming_ops changes_streaming_ops replication_ops \
-                     db_management_ops mango_ops uuid_ops; do
-          echo "=== Running $group ==="
-          rebar3 ct --suite=couchbeam_integration_SUITE --group=$group --readable=true || exit 1
-        done
-        echo "All integration tests passed"
+      run: ./support/run-e2e.sh
