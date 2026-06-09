@@ -822,7 +822,7 @@ all_docs(Config) ->
     {ok, _} = couchbeam:save_docs(Db, Docs),
 
     %% Query all_docs
-    {ok, AllDocs} = couchbeam_view:all(Db, [{include_docs, true}]),
+    {ok, AllDocs} = couchbeam_view:all(Db, [include_docs]),
     true = length(AllDocs) >= 10,
 
     %% Verify structure
@@ -985,9 +985,9 @@ view_reduce(Config) ->
 view_count(Config) ->
     Db = ?config(db, Config),
 
-    %% Count all documents
-    {ok, Count} = couchbeam_view:count(Db),
-    true = Count > 0,
+    %% Count all documents (count/1 returns a bare integer)
+    Count = couchbeam_view:count(Db),
+    true = is_integer(Count) andalso Count > 0,
     ct:pal("Document count: ~p", [Count]),
 
     ok.
@@ -997,7 +997,7 @@ view_first(Config) ->
     Db = ?config(db, Config),
 
     %% Get first document
-    {ok, First} = couchbeam_view:first(Db, [{include_docs, true}]),
+    {ok, First} = couchbeam_view:first(Db, 'all_docs', [include_docs]),
     true = is_map(First),
     true = maps:is_key(<<"id">>, First),
     ct:pal("First document: ~p", [maps:get(<<"id">>, First)]),
@@ -1008,19 +1008,21 @@ view_first(Config) ->
 view_fold(Config) ->
     Db = ?config(db, Config),
 
-    %% Fold over documents counting them
-    {ok, FoldCount} = couchbeam_view:fold(Db, fun(_Row, Acc) ->
-        {ok, Acc + 1}
-    end, 0, []),
+    %% Fold over documents counting them. fold/5 is
+    %% fold(Function, Acc, Db, ViewName, Options); the function returns the
+    %% next accumulator (or stop) and fold returns the final accumulator.
+    FoldCount = couchbeam_view:fold(fun(_Row, Acc) ->
+        Acc + 1
+    end, 0, Db, 'all_docs', []),
 
-    true = FoldCount > 0,
+    true = is_integer(FoldCount) andalso FoldCount > 0,
     ct:pal("Fold counted ~p documents", [FoldCount]),
 
     %% Fold collecting IDs
-    {ok, Ids} = couchbeam_view:fold(Db, fun(Row, Acc) ->
+    Ids = couchbeam_view:fold(fun(Row, Acc) ->
         Id = maps:get(<<"id">>, Row),
-        {ok, [Id | Acc]}
-    end, [], [{limit, 5}]),
+        [Id | Acc]
+    end, [], Db, 'all_docs', [{limit, 5}]),
     5 = length(Ids),
 
     ok.
@@ -1057,11 +1059,10 @@ design_info(Config) ->
 view_cleanup(Config) ->
     Db = ?config(db, Config),
 
-    %% Trigger view cleanup
-    {ok, Result} = couchbeam:view_cleanup(Db),
-    true = maps:get(<<"ok">>, Result, false),
+    %% Trigger view cleanup (returns ok)
+    ok = couchbeam:view_cleanup(Db),
 
-    ct:pal("View cleanup result: ~p", [Result]),
+    ct:pal("View cleanup triggered"),
     ok.
 
 %%====================================================================
@@ -1202,11 +1203,11 @@ error_conflict(Config) ->
 error_invalid_doc(Config) ->
     Server = ?config(server, Config),
 
-    %% Try to open non-existent database
-    {error, not_found} = couchbeam:open_db(Server, <<"this_db_does_not_exist_xyz">>),
+    %% open_db is a local operation; a missing database only surfaces on use
+    {ok, MissingDb} = couchbeam:open_db(Server, <<"this_db_does_not_exist_xyz">>),
+    {error, db_not_found} = couchbeam:db_info(MissingDb),
 
     %% Try to create database with invalid name (empty)
-    %% Note: CouchDB may accept some unusual names, so we test with clearly invalid chars
     {error, _} = couchbeam:create_db(Server, <<"">>),
 
     ct:pal("Invalid document/database errors handled correctly"),

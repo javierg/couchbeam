@@ -202,6 +202,31 @@ ok = couchbeam:delete_attachment(Db, Doc, "file.txt").
 | `couchbeam_changes` | Changes feed |
 | `couchbeam_attachments` | Inline attachment helpers |
 
+## Testing
+
+Unit tests run without any external services:
+
+```
+rebar3 eunit
+```
+
+End-to-end tests run the full client against a real CouchDB. With Docker
+available, one command starts CouchDB, runs the suite, and tears it down:
+
+```
+make e2e
+```
+
+To use a CouchDB you already run, point the runner at it:
+
+```
+COUCHDB_URL=http://127.0.0.1:5984 COUCHDB_USER=admin COUCHDB_PASS=admin \
+  ./support/run-e2e.sh
+```
+
+`make e2e-up` / `make e2e-down` start and stop the bundled CouchDB
+(`docker-compose.yml`) on their own.
+
 ## Contributing
 
 Found a bug or have a feature request? [Open an issue](https://github.com/benoitc/couchbeam/issues).
