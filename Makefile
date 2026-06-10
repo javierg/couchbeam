@@ -1,11 +1,12 @@
 # couchbeam developer tasks.
 
-COUCHDB_URL  ?= http://127.0.0.1:5984
-COUCHDB_USER ?= admin
-COUCHDB_PASS ?= admin
-COMPOSE      ?= docker compose
+COUCHDB_URL     ?= http://127.0.0.1:5984
+COUCHDB_USER    ?= admin
+COUCHDB_PASS    ?= admin
+COUCHDB_VERSION ?= 3
+COMPOSE         ?= docker compose
 
-export COUCHDB_URL COUCHDB_USER COUCHDB_PASS
+export COUCHDB_URL COUCHDB_USER COUCHDB_PASS COUCHDB_VERSION
 
 .PHONY: all compile eunit xref dialyzer test e2e e2e-up e2e-run e2e-down clean
 

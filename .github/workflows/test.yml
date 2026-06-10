@@ -120,14 +120,21 @@ jobs:
           rebar3 xref
           rebar3 as test eunit
 
-  # End-to-end tests against a real CouchDB
+  # End-to-end tests against a real CouchDB.
+  # `3` is the latest 3.x; `latest` tracks the newest release and becomes 4.x
+  # once a 4.x image is published.
   integration:
-    name: Integration Tests (CouchDB)
+    name: Integration Tests (CouchDB ${{ matrix.couchdb }})
     runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        couchdb: ['3', 'latest']
 
     services:
       couchdb:
-        image: couchdb:3.3
+        image: couchdb:${{ matrix.couchdb }}
         env:
           COUCHDB_USER: admin
           COUCHDB_PASSWORD: admin

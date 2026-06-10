@@ -25,14 +25,20 @@ All notable changes to this project will be documented in this file.
 - End-to-end tests run the full client against a real CouchDB. `make e2e`
   starts CouchDB in Docker, runs the suite, and tears it down. CI runs all
   suite groups and they now gate the build.
+- The e2e matrix runs the latest 3.x (`3`) and the `latest` CouchDB image, so
+  CI adopts CouchDB 4.x automatically once it is released.
 
 ### Dependencies
 
 - hackney: 4.2.2 (from 2.0.1)
 - meck (test): 1.2.0 (from 0.9.2)
+- Removed the optional `oauth` dependency.
 
 ### Removed
 
+- OAuth support. The `{oauth, ...}` connection option and
+  `couchbeam_util:oauth_header/3` are gone; CouchDB removed server-side OAuth
+  in 2.x. Basic auth, proxy auth, and cookie auth are unchanged.
 - `hackney:skip_body/1` usage (removed in hackney 4.x); bodies are read directly.
 
 ## [2.0.0] - 2026-01-21

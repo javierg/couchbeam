@@ -2,7 +2,7 @@
 # See `make e2e` (or support/run-e2e.sh) for the test runner.
 services:
   couchdb:
-    image: couchdb:3.3
+    image: couchdb:${COUCHDB_VERSION:-3}
     environment:
       COUCHDB_USER: admin
       COUCHDB_PASSWORD: admin

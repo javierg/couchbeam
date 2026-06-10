@@ -13,8 +13,7 @@
          db_request/5, db_request/6,
          json_body/1,
          db_resp/2,
-         make_headers/4,
-         maybe_oauth_header/4]).
+         make_headers/4]).
 %% urls utils
 -export([server_url/1, db_url/1, doc_url/2]).
 %% atts utils
@@ -137,25 +136,14 @@ db_request(Method, Url, Headers, Body, Options, Expect) ->
 json_body(Body) when is_binary(Body) ->
     couchbeam_ejson:decode(Body).
 
-make_headers(Method, Url, Headers, Options) ->
+make_headers(_Method, _Url, Headers, Options) ->
     Headers1 = case couchbeam_util:get_value(<<"Accept">>, Headers) of
         undefined ->
             [{<<"Accept">>, <<"application/json, */*;q=0.9">>} | Headers];
         _ ->
             Headers
     end,
-   {Headers2, Options1} = maybe_oauth_header(Method, Url, Headers1, Options),
-   maybe_proxyauth_header(Headers2, Options1).
-
-
-maybe_oauth_header(Method, Url, Headers, Options) ->
-    case couchbeam_util:get_value(oauth, Options) of
-        undefined ->
-            {Headers, Options};
-        OauthProps ->
-            Hdr = couchbeam_util:oauth_header(Url, Method, OauthProps),
-            {[Hdr|Headers], proplists:delete(oauth, Options)}
-    end.
+    maybe_proxyauth_header(Headers1, Options).
 
 maybe_proxyauth_header(Headers, Options) ->
   case couchbeam_util:get_value(proxyauth, Options) of
