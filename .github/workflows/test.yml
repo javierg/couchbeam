@@ -3,8 +3,8 @@ name: Test
 on:
   push:
     branches: [ master, main ]
+  # Run on every pull request, whatever its base branch (e.g. stacked PRs).
   pull_request:
-    branches: [ master, main ]
 
 jobs:
   linux:
