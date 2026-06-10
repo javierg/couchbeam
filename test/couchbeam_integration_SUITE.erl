@@ -46,7 +46,8 @@
 -export([doc_with_attachment/1,
          multiple_attachments/1,
          large_attachment/1,
-         attachment_streaming/1]).
+         attachment_streaming/1,
+         doc_multipart_stream/1]).
 
 %% Test cases - Views
 -export([all_docs/1,
@@ -162,7 +163,8 @@ groups() ->
         doc_with_attachment,
         multiple_attachments,
         large_attachment,
-        attachment_streaming
+        attachment_streaming,
+        doc_multipart_stream
     ]},
      {view_ops, [sequence], [
         all_docs,
@@ -805,6 +807,58 @@ collect_stream(Ref, Acc) ->
             Acc;
         {error, Reason} ->
             ct:fail("Stream error: ~p", [Reason])
+    end.
+
+%% Test reading a document and its attachments as a multipart stream.
+doc_multipart_stream(Config) ->
+    Db = ?config(db, Config),
+
+    %% Create a document with two attachments
+    Doc = #{<<"_id">> => <<"mp_stream">>, <<"type">> => <<"test">>},
+    {ok, DocSaved} = couchbeam:save_doc(Db, Doc),
+    Rev0 = maps:get(<<"_rev">>, DocSaved),
+    %% Use a non-compressible content type so CouchDB returns the bytes
+    %% verbatim in the multipart response (text/* attachments are gzipped).
+    {ok, Att1} = couchbeam:put_attachment(Db, <<"mp_stream">>, <<"a.bin">>,
+                                          <<"alpha">>,
+                                          [{rev, Rev0},
+                                           {content_type, <<"application/octet-stream">>}]),
+    Rev1 = maps:get(<<"rev">>, Att1),
+    {ok, _} = couchbeam:put_attachment(Db, <<"mp_stream">>, <<"b.bin">>,
+                                       <<"bravo">>,
+                                       [{rev, Rev1},
+                                        {content_type, <<"application/octet-stream">>}]),
+
+    %% Open it as a multipart stream (attachment bodies included)
+    {ok, {multipart, State}} = couchbeam:open_doc(Db, <<"mp_stream">>,
+                                                  [{"attachments", true}]),
+
+    {DocOut, AttsOut} = collect_multipart(State, undefined, <<>>, #{}),
+
+    <<"mp_stream">> = maps:get(<<"_id">>, DocOut),
+    true = maps:is_key(<<"_attachments">>, DocOut),
+    <<"alpha">> = maps:get(<<"a.bin">>, AttsOut),
+    <<"bravo">> = maps:get(<<"b.bin">>, AttsOut),
+
+    ct:pal("Multipart doc stream test passed"),
+    ok.
+
+%% Drive couchbeam:stream_doc/1 to completion, collecting the document and
+%% each attachment's bytes.
+collect_multipart(State, Doc, CurBuf, Atts) ->
+    case couchbeam:stream_doc(State) of
+        {doc, NewDoc, NState} ->
+            collect_multipart(NState, NewDoc, CurBuf, Atts);
+        {att, _Name, NState} ->
+            collect_multipart(NState, Doc, <<>>, Atts);
+        {att_body, _Name, Chunk, NState} ->
+            collect_multipart(NState, Doc, <<CurBuf/binary, Chunk/binary>>, Atts);
+        {att_eof, Name, NState} ->
+            collect_multipart(NState, Doc, <<>>, Atts#{Name => CurBuf});
+        eof ->
+            {Doc, Atts};
+        {error, Reason} ->
+            ct:fail("Multipart stream error: ~p", [Reason])
     end.
 
 %%====================================================================
