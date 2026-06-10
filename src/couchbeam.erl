@@ -112,19 +112,11 @@ server_connection(Host, Port) when is_integer(Port) ->
 %%          {proxy_password, string()}         |
 %%          {basic_auth, {username(), password()}} |
 %%          {cookie, string()}                 |
-%%          {oauth, oauthOptions()}            |
 %%          {proxyauth, [proxyauthOpt]}
 %%
 %% username() = string()
 %% password() = string()
 %% SSLOpt = term()
-%% oauthOptions() = [oauth()]
-%% oauth() =
-%%          {consumer_key, string()} |
-%%          {token, string()} |
-%%          {token_secret, string()} |
-%%          {consumer_secret, string()} |
-%%          {signature_method, string()}
 %%
 %% proxyauthOpt = {X-Auth-CouchDB-UserName, username :: string()} |
 %%                {X-Auth-CouchDB-Roles, roles :: string} | list_of_user_roles_separated_by_a_comma
