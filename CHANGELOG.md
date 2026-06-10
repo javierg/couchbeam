@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [2.1.0] - 2026-06-09
 
+### Added
+
+- `couchbeam_replicator`: a `gen_statem` pull-replication endpoint that imports
+  documents (with full revision history) from a source CouchDB into a pluggable
+  local target behaviour, with resumable checkpoints. `couchbeam_replicator_ets`
+  is an ets/dets reference target. Pull only; attachment bodies are a follow-up.
+  See `guides/replication.md`.
+
 ### Changed
 
 - Updated to hackney 4.2.2. Response bodies are now read eagerly: a normal

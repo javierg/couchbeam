@@ -19,7 +19,7 @@ export COUCHDB_URL COUCHDB_USER COUCHDB_PASS
 e2e_groups="server_ops database_ops document_ops bulk_ops attachment_ops \
         view_ops design_ops changes_ops error_handling \
         view_streaming_ops changes_streaming_ops replication_ops \
-        db_management_ops mango_ops uuid_ops"
+        pull_replication_ops db_management_ops mango_ops uuid_ops"
 
 for group in $e2e_groups; do
     echo "=== e2e group: ${group} ==="
