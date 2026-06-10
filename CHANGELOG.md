@@ -16,8 +16,15 @@ All notable changes to this project will be documented in this file.
 
 ### Compatibility
 
-- Supports OTP 27, 28 and 29.
-- CI now also runs on OTP 29.
+- Requires OTP 27+. Dropped the OTP-version crypto shim and now always use
+  `crypto:mac/4`.
+- CI runs on OTP 27, 28 and 29.
+
+### Testing
+
+- End-to-end tests run the full client against a real CouchDB. `make e2e`
+  starts CouchDB in Docker, runs the suite, and tears it down. CI runs all
+  suite groups and they now gate the build.
 
 ### Dependencies
 

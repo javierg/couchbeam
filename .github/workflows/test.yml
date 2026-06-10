@@ -120,12 +120,10 @@ jobs:
           rebar3 xref
           rebar3 as test eunit
 
-  # Optional integration tests with real CouchDB
+  # End-to-end tests against a real CouchDB
   integration:
     name: Integration Tests (CouchDB)
     runs-on: ubuntu-22.04
-    # This job is optional - don't block CI if it fails
-    continue-on-error: true
 
     services:
       couchdb:

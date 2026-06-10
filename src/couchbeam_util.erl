@@ -285,10 +285,6 @@ hgv(N,L) ->
 proxy_token(Secret,UserName) ->
     hackney_bstr:to_hex(hmac(sha, Secret, UserName)).
 
--ifdef(USE_CRYPTO_MAC).
+%% couchbeam requires OTP 27+, where crypto:mac/4 is always available.
 hmac(Alg, Key, Data) ->
    crypto:mac(hmac, Alg, Key, Data).
--else.
-hmac(Alg, Key, Data) ->
-   crypto:hmac(Alg, Key, Data).
--endif.
