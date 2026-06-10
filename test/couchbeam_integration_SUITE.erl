@@ -98,6 +98,10 @@
          replicate_continuous/1,
          replicate_filtered/1]).
 
+%% Test cases - Pull replication endpoint (couchbeam_replicator)
+-export([pull_replication_basic/1,
+         pull_replication_resume/1]).
+
 %% Test cases - DB management operations
 -export([compact_database/1,
          compact_design_view/1,
@@ -133,6 +137,7 @@ all() ->
      {group, view_streaming_ops},
      {group, changes_streaming_ops},
      {group, replication_ops},
+     {group, pull_replication_ops},
      {group, db_management_ops},
      {group, mango_ops},
      {group, uuid_ops}].
@@ -214,6 +219,10 @@ groups() ->
         replicate_map_object,
         replicate_continuous,
         replicate_filtered
+    ]},
+     {pull_replication_ops, [sequence], [
+        pull_replication_basic,
+        pull_replication_resume
     ]},
      {db_management_ops, [sequence], [
         compact_database,
@@ -1681,6 +1690,111 @@ replicate_filtered(Config) ->
 
     ct:pal("Filtered replication created"),
     ok.
+
+%%====================================================================
+%% Pull replication endpoint tests (couchbeam_replicator)
+%%====================================================================
+
+%% Pull docs (with revision history) and a deletion from a real CouchDB into
+%% an ets-backed couchbeam_replicator target.
+pull_replication_basic(Config) ->
+    Db = ?config(db, Config),
+
+    %% docA: two revisions
+    {ok, A1} = couchbeam:save_doc(Db, #{<<"_id">> => <<"docA">>, <<"n">> => 1}),
+    {ok, A2} = couchbeam:save_doc(Db, A1#{<<"n">> => 2}),
+    SrcRevA = couchbeam_doc:get_rev(A2),
+    %% docC: single revision
+    {ok, _} = couchbeam:save_doc(Db, #{<<"_id">> => <<"docC">>, <<"v">> => true}),
+    %% docB: created then deleted
+    {ok, B1} = couchbeam:save_doc(Db, #{<<"_id">> => <<"docB">>, <<"x">> => 1}),
+    {ok, _} = couchbeam:delete_doc(Db, B1),
+
+    Tab = new_repl_table(pull_basic),
+    {ok, _} = run_pull_oneshot(Db, Tab, <<"test-basic">>),
+
+    %% docA: one leaf carrying its 2-revision history
+    [SrcRevA] = couchbeam_replicator_ets:leaf_revs(Tab, <<"docA">>),
+    {DocA, #{}} = couchbeam_replicator_ets:get_doc(Tab, <<"docA">>, SrcRevA),
+    #{<<"start">> := 2, <<"ids">> := IdsA} = maps:get(<<"_revisions">>, DocA),
+    2 = length(IdsA),
+    2 = maps:get(<<"n">>, DocA),
+
+    %% docC present
+    [RevC] = couchbeam_replicator_ets:leaf_revs(Tab, <<"docC">>),
+    {_DocC, #{}} = couchbeam_replicator_ets:get_doc(Tab, <<"docC">>, RevC),
+
+    %% docB: deletion replicated as a tombstone
+    [RevB] = couchbeam_replicator_ets:leaf_revs(Tab, <<"docB">>),
+    {DocB, #{}} = couchbeam_replicator_ets:get_doc(Tab, <<"docB">>, RevB),
+    true = maps:get(<<"_deleted">>, DocB),
+
+    ct:pal("Pull replication basic passed"),
+    ok.
+
+%% A second run with the same repl_id resumes from the stored checkpoint and
+%% imports only the changes added since. Uses its own db for an exact count.
+pull_replication_resume(Config) ->
+    Server = ?config(server, Config),
+    DbName = iolist_to_binary([<<"couchbeam_pullresume_">>,
+                               integer_to_binary(erlang:system_time(millisecond))]),
+    {ok, Db} = couchbeam:create_db(Server, DbName),
+    try
+        Tab = new_repl_table(pull_resume),
+        ReplId = <<"test-resume">>,
+
+        {ok, _} = couchbeam:save_doc(Db, #{<<"_id">> => <<"r1">>, <<"v">> => 1}),
+        {ok, _} = couchbeam:save_doc(Db, #{<<"_id">> => <<"r2">>, <<"v">> => 1}),
+
+        {ok, Written1} = run_pull_oneshot(Db, Tab, ReplId),
+        2 = Written1,
+        Seq1 = couchbeam_replicator_ets:checkpoint(Tab, ReplId),
+        true = (Seq1 =/= nil),
+        [_] = couchbeam_replicator_ets:leaf_revs(Tab, <<"r1">>),
+        [_] = couchbeam_replicator_ets:leaf_revs(Tab, <<"r2">>),
+
+        %% add two more docs and resume
+        {ok, _} = couchbeam:save_doc(Db, #{<<"_id">> => <<"r3">>, <<"v">> => 1}),
+        {ok, _} = couchbeam:save_doc(Db, #{<<"_id">> => <<"r4">>, <<"v">> => 1}),
+
+        {ok, Written2} = run_pull_oneshot(Db, Tab, ReplId),
+        2 = Written2,                 %% only the two new docs
+        Seq2 = couchbeam_replicator_ets:checkpoint(Tab, ReplId),
+        true = (Seq2 =/= Seq1),
+        [_] = couchbeam_replicator_ets:leaf_revs(Tab, <<"r3">>),
+        [_] = couchbeam_replicator_ets:leaf_revs(Tab, <<"r4">>),
+
+        ct:pal("Pull replication resume passed"),
+        ok
+    after
+        couchbeam:delete_db(Db)
+    end.
+
+%% Create a fresh named ets table owned by the test process so it outlives the
+%% one-shot replicator.
+new_repl_table(Prefix) ->
+    Tab = list_to_atom(atom_to_list(Prefix) ++ "_" ++
+                       integer_to_list(erlang:unique_integer([positive]))),
+    ets:new(Tab, [named_table, public, set]),
+    Tab.
+
+%% Run a one-shot pull replication into Tab and return {ok, DocsWritten}.
+run_pull_oneshot(Source, Tab, ReplId) ->
+    {ok, Pid} = couchbeam_replicator:start_link(
+                  Source, couchbeam_replicator_ets,
+                  #{table => Tab, backend => ets},
+                  [{repl_id, ReplId}, {notify, self()}]),
+    collect_pull(Pid, 0).
+
+collect_pull(Pid, Written) ->
+    receive
+        {Pid, {docs_written, N}} -> collect_pull(Pid, Written + N);
+        {Pid, {checkpoint, _Seq}} -> collect_pull(Pid, Written);
+        {Pid, done} -> {ok, Written};
+        {Pid, {error, Reason}} -> ct:fail("pull replication error: ~p", [Reason])
+    after 30000 ->
+        ct:fail("pull replication timeout")
+    end.
 
 %%====================================================================
 %% Database management tests
